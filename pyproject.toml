@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests requiring MSSQL Docker (deselect with '-k not integration')",
+    "llm_integration: tests making real OpenAI API calls (deselect with '-k not llm_integration')",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*", "alembic/*"]

@@ -1,0 +1,195 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run: docker-compose up (full stack)",
+            "type": "shell",
+            "command": "docker-compose up --build",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: docker-compose up (SQL Server only)",
+            "type": "shell",
+            "command": "docker-compose up -d sqlserver",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: docker-compose down",
+            "type": "shell",
+            "command": "docker-compose down",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: wait_for_db (create DB if missing)",
+            "type": "shell",
+            "command": "python wait_for_db.py",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "DB_HOST": "127.0.0.1"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: wait_for_db (test DB)",
+            "type": "shell",
+            "command": "python wait_for_db.py",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "DB_HOST": "127.0.0.1",
+                    "DB_NAME": "swagger_agent_test"
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run: alembic upgrade head",
+            "type": "shell",
+            "command": "alembic upgrade head",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "DB_HOST": "127.0.0.1"
+                }
+            },
+            "dependsOn": "Run: wait_for_db (create DB if missing)",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Start local dev server (SQL in Docker)",
+            "type": "shell",
+            "command": "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "DB_HOST": "127.0.0.1"
+                }
+            },
+            "dependsOn": "Run: alembic upgrade head",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: unit tests",
+            "type": "shell",
+            "command": "python -m pytest tests/ -k 'not integration' -v",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: integration tests",
+            "type": "shell",
+            "command": "python -m pytest tests/test_integration.py -v",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "TEST_DB_URL": "mssql+pyodbc://sa:YourStrong!Passw0rd@127.0.0.1:1433/swagger_agent_test?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+                }
+            },
+            "dependsOn": [
+                "Run: docker-compose up (SQL Server only)",
+                "Run: wait_for_db (test DB)"
+            ],
+            "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: all tests",
+            "type": "shell",
+            "command": "python -m pytest tests/ -v",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "TEST_DB_URL": "mssql+pyodbc://sa:YourStrong!Passw0rd@127.0.0.1:1433/swagger_agent_test?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+                }
+            },
+            "dependsOn": [
+                "Run: docker-compose up (SQL Server only)",
+                "Run: wait_for_db (test DB)"
+            ],
+            "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Docker Debug: wait for debugpy",
+            "type": "shell",
+            "command": "docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build -d && python wait_for_debug.py",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "focus": false,
+                "close": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}
