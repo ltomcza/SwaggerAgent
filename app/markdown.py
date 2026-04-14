@@ -142,7 +142,7 @@ def _endpoint_to_markdown(endpoint) -> str:
 
     # AI Analysis section (only if any AI field is present)
     has_ai_content = any([
-        getattr(endpoint, "ai_summary", None) and not endpoint.summary,
+        getattr(endpoint, "ai_summary", None),
         getattr(endpoint, "ai_use_cases", None),
         getattr(endpoint, "ai_request_example", None),
         getattr(endpoint, "ai_response_example", None),
@@ -153,8 +153,11 @@ def _endpoint_to_markdown(endpoint) -> str:
         lines.append("")
 
         ai_summary = getattr(endpoint, "ai_summary", None)
-        if ai_summary and not endpoint.summary:
-            lines.append(f"_{ai_summary}_")
+        if ai_summary:
+            if endpoint.summary:
+                lines.append(f"*AI Summary:* _{ai_summary}_")
+            else:
+                lines.append(f"_{ai_summary}_")
             lines.append("")
 
         ai_use_cases = getattr(endpoint, "ai_use_cases", None)

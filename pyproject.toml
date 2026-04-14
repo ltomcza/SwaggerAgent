@@ -1,10 +1,17 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: tests requiring MSSQL Docker (deselect with '-k not integration')",
+    "integration: tests requiring PostgreSQL Docker (deselect with '-k not integration')",
     "llm_integration: tests making real OpenAI API calls (deselect with '-k not llm_integration')",
 ]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # LangChain's with_structured_output wraps results in an internal model whose
+    # `parsed` field Pydantic v2 warns about during serialization (e.g. LangSmith
+    # tracing).  Our own models are unaffected; suppress only this specific pattern.
+    "ignore:(?s)Pydantic serializer warnings.*field_name='parsed':UserWarning",
+]
 
 [tool.coverage.run]
 source = ["app"]

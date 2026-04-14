@@ -2,11 +2,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    DB_TYPE: str = "postgres"  # "postgres" or "sqlserver"
     DB_HOST: str = "localhost"
-    DB_PORT: int = 1433
+    DB_PORT: int = 5432
     DB_NAME: str = "swagger_agent"
-    DB_USER: str = "sa"
-    DB_PASSWORD: str = "YourStrong!Passw0rd"
+    DB_USER: str = "postgres"
+    DB_PASSWORD: str = "postgres"
     OPENAI_API_KEY: str = ""
     LLM_MODEL: str = "gpt-5-mini"
     LLM_TEMPERATURE: float = 0.0
@@ -19,10 +20,16 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        if self.DB_TYPE == "sqlserver":
+            return (
+                f"mssql+pyodbc://{self.DB_USER}:{self.DB_PASSWORD}"
+                f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+                f"?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+            )
+        # Default: postgres
         return (
-            f"mssql+pyodbc://{self.DB_USER}:{self.DB_PASSWORD}"
+            f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-            f"?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
         )
 
 

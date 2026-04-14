@@ -11,7 +11,8 @@ An AI-powered FastAPI service that fetches, parses, and stores OpenAPI/Swagger d
 - **LLM-Powered Analysis** — generates service overviews, use-cases, documentation quality scores (0–100), API design scores, and per-endpoint request/response examples
 - **Markdown Reports** — on-demand single-service or all-services reports with Table of Contents
 - **Background Scanning** — non-blocking scans via FastAPI `BackgroundTasks`
-- **MSSQL Storage** — persistent storage with Alembic migrations and cascade deletes
+- **MCP Server** — Model Context Protocol (JSON-RPC 2.0) endpoint exposing `GetServices` and `GetServiceDetails` tools for AI agent integrations
+- **PostgreSQL / MSSQL Storage** — persistent storage with Alembic migrations and cascade deletes (PostgreSQL default, MSSQL optional via `DB_TYPE`)
 
 ---
 
@@ -41,9 +42,11 @@ SwaggerAgent follows a pipeline architecture: services are registered via REST A
 ```mermaid
 graph TB
     Client([REST Client])
+    AIAgent([AI Agent])
 
     subgraph FastAPI["FastAPI Application"]
         API[API Layer<br/>app/api.py]
+        MCP[MCP Server<br/>app/mcp.py<br/><i>JSON-RPC 2.0</i>]
         BG[BackgroundTasks]
     end
 
@@ -58,11 +61,13 @@ graph TB
         S7[Step 7: Endpoint LLM Analysis]
     end
 
-    DB[(MSSQL Database)]
+    DB[(Database<br/>PostgreSQL / MSSQL)]
     LLM[OpenAI API<br/>gpt-5-mini]
     ExtAPI([External APIs<br/>Swagger/OpenAPI Specs])
 
     Client -->|HTTP| API
+    AIAgent -->|JSON-RPC| MCP
+    MCP -->|Query| DB
     API --> BG
     BG --> S1
     S1 -->|HTTP GET| ExtAPI
@@ -88,6 +93,7 @@ graph TB
     style S6 fill:#f3e5f5
     style S7 fill:#f3e5f5
     style LLM fill:#f3e5f5
+    style MCP fill:#e8f5e9
 ```
 
 ### Module Responsibility
@@ -102,9 +108,10 @@ graph TB
 | `app/crud.py` | All database operations; `replace_endpoints()` does delete-then-insert |
 | `app/models.py` | SQLAlchemy ORM: `Service`, `Endpoint`, `ScanLog` |
 | `app/schemas.py` | Pydantic request/response schemas with `from_attributes=True` |
-| `app/config.py` | Pydantic-Settings; builds MSSQL ODBC connection string |
+| `app/config.py` | Pydantic-Settings; builds database connection string (PostgreSQL or MSSQL) |
 | `app/database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db` dependency |
 | `app/markdown.py` | Markdown report generation (single service and all-services with TOC) |
+| `app/mcp.py` | MCP (Model Context Protocol) JSON-RPC 2.0 server — `GetServices` and `GetServiceDetails` tools |
 
 ---
 
@@ -290,6 +297,21 @@ erDiagram
 |--------|------|--------|----------|---------|
 | `GET` | `/health` | 200 | `{"status": "ok", "service": "SwaggerAgent"}` | Health check |
 
+### MCP (Model Context Protocol)
+
+| Method | Path | Status | Response | Purpose |
+|--------|------|--------|----------|---------|
+| `POST` | `/mcp` | 200/202 | JSON-RPC 2.0 | MCP tool-call endpoint for AI agent integrations |
+
+The MCP endpoint implements JSON-RPC 2.0 and exposes two tools:
+
+| Tool | Input | Description |
+|------|-------|-------------|
+| `GetServices` | _(none)_ | List all registered services with names and AI overview descriptions |
+| `GetServiceDetails` | `service_name` (string) | Full Markdown documentation for a named service (case-insensitive match) |
+
+Supported JSON-RPC methods: `initialize`, `ping`, `tools/list`, `tools/call`.
+
 ### Key Schemas
 
 **ServiceCreate** (POST `/services` body):
@@ -457,11 +479,12 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DB_HOST` | `localhost` | MSSQL server hostname |
-| `DB_PORT` | `1433` | MSSQL server port |
+| `DB_TYPE` | `postgres` | Database backend: `postgres` or `sqlserver` |
+| `DB_HOST` | `localhost` | Database server hostname |
+| `DB_PORT` | `5432` | Database server port (5432 for PostgreSQL, 1433 for MSSQL) |
 | `DB_NAME` | `swagger_agent` | Database name |
-| `DB_USER` | `sa` | Database user |
-| `DB_PASSWORD` | `YourStrong!Passw0rd` | Database password |
+| `DB_USER` | `postgres` | Database user |
+| `DB_PASSWORD` | `postgres` | Database password |
 | `OPENAI_API_KEY` | `""` (disabled) | OpenAI API key; empty = skip LLM analysis |
 | `LLM_MODEL` | `gpt-5-mini` | Reserved for future pipeline steps |
 | `LLM_TEMPERATURE` | `0.0` | Reserved for future pipeline steps |
@@ -472,8 +495,14 @@ cp .env.example .env
 
 ### Database Connection String
 
-Built automatically by `app/config.py`:
+Built automatically by `app/config.py` based on `DB_TYPE`:
 
+**PostgreSQL** (default):
+```
+postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
+```
+
+**MSSQL** (`DB_TYPE=sqlserver`):
 ```
 mssql+pyodbc://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
   ?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
@@ -486,13 +515,13 @@ mssql+pyodbc://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}
 ### Prerequisites
 
 - **Python 3.12+**
-- **Docker & Docker Compose** (for MSSQL server)
-- **ODBC Driver 18 for SQL Server** (for local development without Docker)
+- **Docker & Docker Compose** (for PostgreSQL server)
 - **OpenAI API key** (optional — LLM analysis is skipped without it)
+- **ODBC Driver 18 for SQL Server** (only if using `DB_TYPE=sqlserver`)
 
 ### Option 1: Docker Compose (Production)
 
-Starts both MSSQL and the application:
+Starts both PostgreSQL and the application:
 
 ```bash
 # Copy and configure environment
@@ -504,28 +533,28 @@ docker-compose up --build
 ```
 
 The Dockerfile entrypoint automatically:
-1. Waits for MSSQL to be ready (`wait_for_db.py`)
+1. Waits for the database to be ready (`wait_for_db.py`)
 2. Runs Alembic migrations (`alembic upgrade head`)
 3. Starts Uvicorn on port `8000`
 
 The API is available at `http://localhost:8000`. Health check: `GET http://localhost:8000/health`.
 
-### Option 2: Local Development (SQL in Docker)
+### Option 2: Local Development (PostgreSQL in Docker)
 
-Run MSSQL in Docker, application locally with hot-reload:
+Run PostgreSQL in Docker, application locally with hot-reload:
 
 ```bash
-# Start SQL Server only
-docker-compose up -d sqlserver
+# Start PostgreSQL only
+docker-compose up -d postgres
 
 # Wait for database to be ready and create it if missing
-DB_HOST=127.0.0.1 python wait_for_db.py
+DB_TYPE=postgres DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=swagger_agent DB_PASSWORD='YourStrong!Passw0rd' python wait_for_db.py
 
 # Run Alembic migrations
-DB_HOST=127.0.0.1 alembic upgrade head
+DB_TYPE=postgres DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=swagger_agent DB_PASSWORD='YourStrong!Passw0rd' alembic upgrade head
 
 # Start the app with live reload
-DB_HOST=127.0.0.1 uvicorn app.main:app --reload
+DB_TYPE=postgres DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=swagger_agent DB_PASSWORD='YourStrong!Passw0rd' uvicorn app.main:app --reload
 ```
 
 ### Option 3: Debug Mode (Docker + debugpy)
@@ -574,11 +603,11 @@ curl http://localhost:8000/services/1/markdown
 
 ### Strategy
 
-- **Unit tests**: Use an **in-memory SQLite** database (no MSSQL required). The `tests/conftest.py` does three critical things at import time:
-  1. **Stubs `pyodbc`** before SQLAlchemy imports it (pyodbc is not available in the test environment)
+- **Unit tests**: Use an **in-memory SQLite** database (no PostgreSQL required). The `tests/conftest.py` does three critical things at import time:
+  1. **Stubs `pyodbc`** before SQLAlchemy imports it (pyodbc is only needed for `DB_TYPE=sqlserver`)
   2. **Creates a `StaticPool` SQLite engine** so tables persist within a test session
   3. **Overrides FastAPI's `get_db` dependency** to use the test session
-- **Integration tests**: Require a live MSSQL instance (Docker). Marked with `@pytest.mark.integration`.
+- **Integration tests**: Require a live PostgreSQL instance (Docker). Marked with `@pytest.mark.integration`.
 - **LLM integration tests**: Make real OpenAI API calls. Marked with `@pytest.mark.llm_integration`. Skipped if `OPENAI_API_KEY` is not set.
 
 ### Key Fixtures (`tests/conftest.py`)
@@ -593,10 +622,10 @@ curl http://localhost:8000/services/1/markdown
 ### Commands
 
 ```bash
-# Run all unit tests (no MSSQL required)
+# Run all unit tests (no PostgreSQL required)
 pytest -k "not integration" -v
 
-# Run all tests (requires MSSQL Docker)
+# Run all tests (requires PostgreSQL Docker)
 pytest -v
 
 # Run a single test file
@@ -608,7 +637,7 @@ pytest tests/test_tools.py::test_fetch_swagger_json_success
 # Run with coverage report
 pytest --cov=app --cov-report=term-missing
 
-# Run integration tests only (requires MSSQL Docker)
+# Run integration tests only (requires PostgreSQL Docker)
 pytest tests/test_integration.py -v
 
 # Run LLM integration tests (requires OPENAI_API_KEY)
@@ -625,7 +654,8 @@ pytest tests/test_llm_integration.py -v
 | `tests/test_analysis.py` | Auth type/required inference heuristics | 29 |
 | `tests/test_markdown.py` | Markdown generation and formatting | 28+ |
 | `tests/test_agent.py` | Pipeline execution, change detection, force flag | 11 |
-| `tests/test_integration.py` | Full workflow with real MSSQL | varies |
+| `tests/test_mcp.py` | MCP JSON-RPC endpoint and tool calls | varies |
+| `tests/test_integration.py` | Full workflow with real PostgreSQL | varies |
 | `tests/test_llm_integration.py` | Real OpenAI API calls | varies |
 
 ### Pytest Markers
@@ -634,7 +664,7 @@ Defined in `pyproject.toml`:
 
 | Marker | Purpose | Skip with |
 |--------|---------|-----------|
-| `integration` | Tests requiring MSSQL Docker | `-k "not integration"` |
+| `integration` | Tests requiring PostgreSQL Docker | `-k "not integration"` |
 | `llm_integration` | Tests making real OpenAI API calls | `-k "not llm_integration"` |
 
 ---
@@ -682,9 +712,10 @@ SwaggerAgent/
 │   ├── crud.py            # All database CRUD operations
 │   ├── models.py          # SQLAlchemy ORM models (Service, Endpoint, ScanLog)
 │   ├── schemas.py         # Pydantic request/response schemas
-│   ├── config.py          # Pydantic-Settings, MSSQL connection string
+│   ├── config.py          # Pydantic-Settings, database connection string
 │   ├── database.py        # SQLAlchemy engine, SessionLocal, get_db
-│   └── markdown.py        # Markdown report generation
+│   ├── markdown.py        # Markdown report generation
+│   └── mcp.py             # MCP (Model Context Protocol) JSON-RPC 2.0 server
 ├── alembic/
 │   ├── env.py             # Alembic migration environment
 │   └── versions/
@@ -697,14 +728,15 @@ SwaggerAgent/
 │   ├── test_analysis.py   # Auth inference tests
 │   ├── test_markdown.py   # Markdown generation tests
 │   ├── test_agent.py      # Pipeline execution tests
-│   ├── test_integration.py    # Full MSSQL integration tests
+│   ├── test_mcp.py        # MCP JSON-RPC endpoint tests
+│   ├── test_integration.py    # Full PostgreSQL integration tests
 │   └── test_llm_integration.py # Real OpenAI API tests
 ├── logs/                  # Application log files (auto-created)
 ├── Dockerfile             # Python 3.12-slim + ODBC Driver 18
-├── docker-compose.yml     # Production: MSSQL 2022 + app
+├── docker-compose.yml     # Production: PostgreSQL 18 + app
 ├── docker-compose.debug.yml  # Debug overlay: debugpy + volume mount
 ├── debug_main.py          # Entrypoint for debug mode
-├── wait_for_db.py         # Waits for MSSQL, creates DB if missing
+├── wait_for_db.py         # Waits for database, creates DB if missing
 ├── wait_for_debug.py      # Waits for debugpy to be ready
 ├── alembic.ini            # Alembic configuration
 ├── pyproject.toml         # Pytest config, coverage settings

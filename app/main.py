@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from app.api import router
+from app.mcp import router as mcp_router
 
 # Ensure the logs directory exists before configuring FileHandler
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -39,6 +40,7 @@ app = FastAPI(
 )
 
 app.include_router(router)
+app.include_router(mcp_router)
 
 
 @app.get("/health")

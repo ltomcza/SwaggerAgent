@@ -183,6 +183,19 @@ class TestServiceToMarkdown:
         assert "application/json" in md
         assert "application/xml" not in md
 
+    def test_ai_summary_shown_even_when_spec_summary_present(self):
+        ep = make_endpoint(summary="List all users")
+        ep.ai_summary = "Returns a paginated list of active users."
+        ep.ai_use_cases = None
+        ep.ai_request_example = None
+        ep.ai_response_example = None
+        ep.ai_notes = None
+        ep.auth_required = None
+        service = make_service(endpoints=[ep])
+        md = service_to_markdown(service)
+        assert "AI Summary" in md
+        assert "Returns a paginated list of active users." in md
+
     def test_renders_api_design_audit_section(self):
         service = make_service()
         service.ai_overview = "Overview text"

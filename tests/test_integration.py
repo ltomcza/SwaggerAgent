@@ -2,11 +2,11 @@
 Integration tests for SwaggerAgent.
 
 Requirements:
-- SQL Server available via TEST_DB_URL or docker-compose
+- PostgreSQL available via TEST_DB_URL or docker-compose (default)
 - Run with: pytest tests/test_integration.py -v -m integration
 
 Environment variables:
-- TEST_DB_URL: MSSQL connection string (optional, defaults to localhost)
+- TEST_DB_URL: database connection string (optional, defaults to local PostgreSQL)
 - SKIP_INTEGRATION: set to "1" to skip integration tests
 """
 import json
@@ -27,17 +27,16 @@ pytestmark = pytest.mark.integration
 
 
 def get_test_db_url() -> str:
-    """Returns the connection string for the test MSSQL database."""
+    """Returns the connection string for the test database (PostgreSQL by default)."""
     return os.getenv(
         "TEST_DB_URL",
-        "mssql+pyodbc://sa:YourStrong!Passw0rd@localhost:1433/swagger_agent_test"
-        "?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+        "postgresql+psycopg2://swagger_agent:YourStrong!Passw0rd@localhost:5432/swagger_agent_test",
     )
 
 
 @pytest.fixture(scope="module")
 def integration_engine():
-    """Creates an engine for the test MSSQL database."""
+    """Creates an engine for the test database."""
     if skip_integration:
         pytest.skip("Integration tests skipped (SKIP_INTEGRATION=1)")
 
@@ -49,7 +48,7 @@ def integration_engine():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as e:
-        pytest.skip(f"MSSQL not available: {e}")
+        pytest.skip(f"Database not available: {e}")
 
     # Create tables
     Base.metadata.create_all(bind=engine)

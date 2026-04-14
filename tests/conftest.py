@@ -2,7 +2,8 @@
 conftest.py - pytest fixtures for SwaggerAgent unit tests.
 
 Bootstrap strategy:
-  1. Patch pyodbc (not installed in CI) before any app import touches it.
+  1. Stub pyodbc if not installed (only needed for DB_TYPE=sqlserver) before
+     any app import touches it.
   2. Create an in-memory SQLite engine and inject it into app.database so that
      every module that does `from app.database import SessionLocal / engine`
      gets the test version.

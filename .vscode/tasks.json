@@ -17,9 +17,9 @@
             "problemMatcher": []
         },
         {
-            "label": "Run: docker-compose up (SQL Server only)",
+            "label": "Run: docker-compose up (Postgres only)",
             "type": "shell",
-            "command": "docker-compose up -d sqlserver",
+            "command": "docker-compose up -d postgres",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
@@ -49,7 +49,12 @@
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
-                    "DB_HOST": "127.0.0.1"
+                    "DB_TYPE": "postgres",
+                    "DB_HOST": "127.0.0.1",
+                    "DB_PORT": "5432",
+                    "DB_USER": "swagger_agent",
+                    "DB_PASSWORD": "YourStrong!Passw0rd",
+                    "DB_NAME": "swagger_agent"
                 }
             },
             "presentation": {
@@ -65,7 +70,11 @@
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
+                    "DB_TYPE": "postgres",
                     "DB_HOST": "127.0.0.1",
+                    "DB_PORT": "5432",
+                    "DB_USER": "swagger_agent",
+                    "DB_PASSWORD": "YourStrong!Passw0rd",
                     "DB_NAME": "swagger_agent_test"
                 }
             },
@@ -82,7 +91,12 @@
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
-                    "DB_HOST": "127.0.0.1"
+                    "DB_TYPE": "postgres",
+                    "DB_HOST": "127.0.0.1",
+                    "DB_PORT": "5432",
+                    "DB_USER": "swagger_agent",
+                    "DB_PASSWORD": "YourStrong!Passw0rd",
+                    "DB_NAME": "swagger_agent"
                 }
             },
             "dependsOn": "Run: wait_for_db (create DB if missing)",
@@ -93,13 +107,18 @@
             "problemMatcher": []
         },
         {
-            "label": "Start local dev server (SQL in Docker)",
+            "label": "Start local dev server (Postgres in Docker)",
             "type": "shell",
             "command": "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
-                    "DB_HOST": "127.0.0.1"
+                    "DB_TYPE": "postgres",
+                    "DB_HOST": "127.0.0.1",
+                    "DB_PORT": "5432",
+                    "DB_USER": "swagger_agent",
+                    "DB_PASSWORD": "YourStrong!Passw0rd",
+                    "DB_NAME": "swagger_agent"
                 }
             },
             "dependsOn": "Run: alembic upgrade head",
@@ -139,11 +158,11 @@
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
-                    "TEST_DB_URL": "mssql+pyodbc://sa:YourStrong!Passw0rd@127.0.0.1:1433/swagger_agent_test?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+                    "TEST_DB_URL": "postgresql+psycopg2://swagger_agent:YourStrong!Passw0rd@127.0.0.1:5432/swagger_agent_test"
                 }
             },
             "dependsOn": [
-                "Run: docker-compose up (SQL Server only)",
+                "Run: docker-compose up (Postgres only)",
                 "Run: wait_for_db (test DB)"
             ],
             "dependsOrder": "sequence",
@@ -161,11 +180,11 @@
             "options": {
                 "cwd": "${workspaceFolder}",
                 "env": {
-                    "TEST_DB_URL": "mssql+pyodbc://sa:YourStrong!Passw0rd@127.0.0.1:1433/swagger_agent_test?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes"
+                    "TEST_DB_URL": "postgresql+psycopg2://swagger_agent:YourStrong!Passw0rd@127.0.0.1:5432/swagger_agent_test"
                 }
             },
             "dependsOn": [
-                "Run: docker-compose up (SQL Server only)",
+                "Run: docker-compose up (Postgres only)",
                 "Run: wait_for_db (test DB)"
             ],
             "dependsOrder": "sequence",
