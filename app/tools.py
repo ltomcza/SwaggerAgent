@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import crud
 from app.config import settings
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class EndpointAnalysisItem(BaseModel):
     path: str
     method: str
-    summary: str    # plain-English description, max 120 chars
+    summary: str    # plain-English description, max 255 chars
     use_cases: str  # pipe-separated: "Use case A|Use case B"
     notes: str      # inferred caveats, or empty string
 
@@ -34,9 +34,9 @@ class EndpointAnalysisItem(BaseModel):
 class ServiceAnalysisOutput(BaseModel):
     overview: str
     use_cases: list[str]
-    quality_score: int   # 0–100
+    quality_score: int = Field(ge=0, le=100)   # documentation quality
     quality_notes: str
-    design_score: int    # 0-100 API design quality score
+    design_score: int = Field(ge=0, le=100)    # API design quality
     design_recommendations: str
     endpoint_analyses: list[EndpointAnalysisItem]
 
@@ -406,6 +406,9 @@ def analyze_service_with_llm(service_id: int, parsed_data: dict) -> str:
 Title: {title} | Version: {spec_version} | Base URL: {base_url}
 Description: {description}
 
+## SECURITY SCHEMES
+{security_schemes_text}
+
 ## ENDPOINTS ({len(endpoints)} total)
 {endpoints_text}
 
@@ -416,23 +419,41 @@ Return a JSON object with exactly these keys:
 
 "use_cases": An array of 4-10 strings, each a concrete business workflow this API enables.
 
-"quality_score": An integer 0-100 rating the documentation quality.
-  90-100: All endpoints have descriptions, good examples, clear parameters.
-  70-89: Most endpoints documented, minor gaps.
-  50-69: Basic summaries present but sparse details.
-  30-49: Many endpoints undocumented or unclear.
-  0-29: Minimal or no documentation.
+"quality_score": An integer 0-100 rating documentation quality. Evaluate every signal below, then assign a score in the matching band:
+  Signals to evaluate:
+    - What percentage of endpoints have a non-empty summary?
+    - What percentage of endpoints have a description beyond the summary?
+    - Are path/query parameters documented with name, type, and description?
+    - Are request body schemas defined with property-level descriptions?
+    - Are response schemas defined for success (2xx) and error (4xx/5xx) codes?
+    - Are example values provided for parameters, request bodies, or responses?
+    - Are authentication requirements documented per endpoint or globally?
+  Score bands:
+    90-100: >=95% of endpoints have summaries AND descriptions; parameter types and descriptions present; response schemas defined for 2xx and at least one error code; request/response examples provided for most endpoints.
+    70-89:  >75% of endpoints have summaries; most have response schemas for 2xx; parameter types present but some lack descriptions; few or no inline examples.
+    50-69:  40-75% of endpoints have summaries; response schemas present but incomplete (missing error codes or property descriptions); parameters listed but sparsely documented.
+    30-49:  <40% of endpoints have summaries; most lack response schemas or parameter descriptions; no examples; authentication requirements unclear.
+    0-29:   Endpoints have auto-generated or empty summaries only; no parameter documentation; no response schemas; no examples; undocumented auth.
 
-"quality_notes": 3-4 sentences explaining the score and the top 3-4 specific gaps or strengths.
+"quality_notes": 3-5 sentences explaining the score. Cite specific counts (e.g., "12 of 35 endpoints lack summaries", "no endpoint defines error response schemas"). Name the top 3-4 specific gaps or strengths.
 
-"design_score": An integer 0-100 rating API design quality against REST conventions:
-    - Consistent resource naming (plural nouns, predictable path structure)
-    - Proper HTTP verb usage for intent (GET read, POST create, PUT/PATCH update, DELETE remove)
-    - Pagination/filtering/sorting consistency for list endpoints
-    - Versioning strategy clarity and consistency (path/header/query, stable approach)
-    - Idempotency behavior for retry safety (especially PUT/DELETE and idempotency keys where relevant)
+"design_score": An integer 0-100 rating API design quality. Evaluate every criterion below, then assign a score in the matching band:
+  Criteria to evaluate:
+    - Resource naming: consistent plural nouns, predictable hierarchy (e.g., /users/{{id}}/orders)
+    - HTTP verb semantics: GET for reads, POST for creates, PUT/PATCH for updates, DELETE for removals; no verbs in path segments (e.g., /getUser is an anti-pattern)
+    - Collection endpoints: consistent pagination (limit/offset or cursor), filtering, and sorting parameters on list endpoints
+    - Versioning: clear and consistent strategy (path prefix, header, or query param)
+    - Error model: consistent error response structure across endpoints (e.g., standard problem+json or {{error, message}} shape)
+    - Idempotency: PUT/DELETE are naturally idempotent; POST endpoints for creates support idempotency keys where relevant
+    - Security scheme design: appropriate auth for resource sensitivity (e.g., not leaving mutation endpoints unprotected)
+  Score bands:
+    90-100: Consistent plural-noun resources with logical nesting; correct verb semantics everywhere; all list endpoints support pagination; clear versioning; standard error model; auth properly scoped.
+    70-89:  Mostly consistent naming and verbs; minor deviations (1-2 singular nouns or verb-in-path); most list endpoints paginated; versioning present but minor inconsistencies; error model mostly consistent.
+    50-69:  Mixed naming conventions (some singular, some plural); occasional verb misuse (e.g., POST used for retrieval); no consistent pagination or filtering pattern; versioning unclear or mixed; no standard error model.
+    30-49:  Significant REST anti-patterns — verbs in paths (e.g., /getUsers, /deleteItem), no resource hierarchy, inconsistent methods; no pagination; no versioning; no error structure.
+    0-29:   RPC-style API — action-oriented paths, single HTTP method for everything, no discernible resource model, no REST conventions followed.
 
-"design_recommendations": 4-6 concise, actionable recommendations that would improve the API design. Mention concrete path or method patterns from this API when possible.
+"design_recommendations": 4-6 concise, actionable recommendations. For each, reference the specific criterion it addresses and cite concrete path or method patterns from this API as examples of what to fix.
 
 "endpoint_analyses": An array of objects, one per endpoint listed above. Each object must have:
   "path": the exact endpoint path
@@ -527,7 +548,14 @@ def analyze_endpoint_with_llm(service_id: int, path: str, method: str) -> str:
         body_str = _format_json_for_prompt(ep.request_body_json) or "None"
         response_str = _format_json_for_prompt(ep.response_json) or "None"
 
+        # Fetch service-level context for better domain inference
+        service = crud.get_service(db, service_id)
+        service_title = service.name if service else "Unknown"
+        service_base_url = service.base_url if service else "Unknown"
+
         prompt = f"""You are an expert API analyst. Analyze this single API endpoint.
+
+SERVICE: {service_title} ({service_base_url})
 
 METHOD: {ep.method}
 PATH: {ep.path}
@@ -544,9 +572,9 @@ RESPONSE SCHEMAS:
 {response_str}
 
 Provide:
-- inferred_summary: A clear, specific 1-2-sentence description of what this endpoint does. Max 120 characters.
-- request_example: A JSON-encoded string of a realistic request body (null if no request body). Use realistic values — real names, emails, IDs. Example: "{{\\"name\\": \\"Alice\\", \\"age\\": 30}}"
-- response_example: A JSON-encoded string of a typical 200/201 response (null if no meaningful response body). Example: "{{\\"id\\": 1, \\"name\\": \\"Alice\\"}}" """
+- inferred_summary: A clear, specific 1-2 sentence description of what this endpoint does. Max 120 characters. Use the service context to infer domain-appropriate language.
+- request_example: A realistic request body as a raw JSON string, or null if the endpoint accepts no request body. Use domain-realistic values (real-looking names, emails, UUIDs, dates). IMPORTANT: Return a plain JSON string, NOT wrapped in markdown code fences. Example: "{{\\"name\\": \\"Alice\\", \\"email\\": \\"alice@example.com\\"}}"
+- response_example: A typical 200/201 response body as a raw JSON string, or null if no meaningful response body. Include realistic field values matching the response schema. IMPORTANT: Return a plain JSON string, NOT wrapped in markdown code fences. Example: "{{\\"id\\": 1, \\"name\\": \\"Alice\\", \\"created_at\\": \\"2025-01-15T09:30:00Z\\"}}" """
 
         model = init_chat_model(settings.LLM_ANALYSIS_MODEL, temperature=settings.LLM_ANALYSIS_TEMPERATURE)
         analysis = cast(EndpointDeepAnalysisOutput, model.with_structured_output(EndpointDeepAnalysisOutput).invoke(
