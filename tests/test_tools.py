@@ -89,6 +89,461 @@ class TestFetchSwaggerJson:
 
 
 # ---------------------------------------------------------------------------
+# TestFetchSwaggerJsonHtmlExtraction
+# ---------------------------------------------------------------------------
+
+VALID_SPEC = {"openapi": "3.0.0", "info": {"title": "Test", "version": "1"}, "paths": {}}
+VALID_SPEC_JSON = json.dumps(VALID_SPEC)
+
+VALID_YAML_SPEC = """\
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1"
+paths: {}
+"""
+
+
+def _html_resp(html_body: str):
+    """Create a mock response that returns HTML."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+    resp.text = html_body
+    resp.json.side_effect = ValueError("Not JSON")
+    return resp
+
+
+def _json_spec_resp():
+    """Create a mock response that returns a valid OpenAPI JSON spec."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {"Content-Type": "application/json"}
+    resp.json.return_value = VALID_SPEC
+    resp.text = VALID_SPEC_JSON
+    return resp
+
+
+def _yaml_spec_resp():
+    """Create a mock response that returns a valid OpenAPI YAML spec."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {"Content-Type": "text/yaml"}
+    resp.json.side_effect = ValueError("Not JSON")
+    resp.text = VALID_YAML_SPEC
+    return resp
+
+
+def _not_found_resp():
+    resp = MagicMock()
+    resp.status_code = 404
+    resp.headers = {"Content-Type": "text/plain", "Link": ""}
+    return resp
+
+
+class TestHelperIsSwaggerDict:
+    def test_positive_openapi(self):
+        from app.tools import _is_swagger_dict
+        assert _is_swagger_dict({"openapi": "3.0.0"}) is True
+
+    def test_positive_swagger(self):
+        from app.tools import _is_swagger_dict
+        assert _is_swagger_dict({"swagger": "2.0"}) is True
+
+    def test_positive_paths(self):
+        from app.tools import _is_swagger_dict
+        assert _is_swagger_dict({"paths": {}}) is True
+
+    def test_negative_random_dict(self):
+        from app.tools import _is_swagger_dict
+        assert _is_swagger_dict({"foo": "bar"}) is False
+
+    def test_negative_not_dict(self):
+        from app.tools import _is_swagger_dict
+        assert _is_swagger_dict([1, 2, 3]) is False
+        assert _is_swagger_dict("string") is False
+
+
+class TestHelperTryParseYaml:
+    def test_valid_yaml(self):
+        from app.tools import _try_parse_yaml
+        result = _try_parse_yaml(VALID_YAML_SPEC)
+        assert result is not None
+        assert "openapi" in result
+
+    def test_invalid_yaml(self):
+        from app.tools import _try_parse_yaml
+        assert _try_parse_yaml("just a plain string") is None
+
+    def test_yaml_not_swagger(self):
+        from app.tools import _try_parse_yaml
+        assert _try_parse_yaml("foo: bar\nbaz: 1") is None
+
+
+class TestHelperExtractSpecUrls:
+    def test_swagger_ui_bundle(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = '''<script>SwaggerUIBundle({ url: "/v1/swagger.json", dom_id: "#app" })</script>'''
+        urls = _extract_spec_urls_from_html(html, "https://example.com/docs")
+        assert "https://example.com/v1/swagger.json" in urls
+
+    def test_redoc_spec_url(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = '''<redoc spec-url="/api/openapi.json"></redoc>'''
+        urls = _extract_spec_urls_from_html(html, "https://example.com/docs")
+        assert "https://example.com/api/openapi.json" in urls
+
+    def test_rapidoc_spec_url(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = '''<rapi-doc spec-url="https://other.com/openapi.yaml"></rapi-doc>'''
+        urls = _extract_spec_urls_from_html(html, "https://example.com/")
+        assert "https://other.com/openapi.yaml" in urls
+
+    def test_relative_url_resolution(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = '''<a href="./openapi.json">Download spec</a>'''
+        urls = _extract_spec_urls_from_html(html, "https://example.com/docs/index.html")
+        assert "https://example.com/docs/openapi.json" in urls
+
+    def test_deduplication(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = '''
+        <script>SwaggerUIBundle({ url: "/openapi.json" })</script>
+        <a href="/openapi.json">link</a>
+        '''
+        urls = _extract_spec_urls_from_html(html, "https://example.com/")
+        assert urls.count("https://example.com/openapi.json") == 1
+
+
+class TestHelperExtractEmbeddedSpec:
+    def test_script_application_json(self):
+        from app.tools import _extract_embedded_spec_from_html
+        html = f'<script type="application/json">{VALID_SPEC_JSON}</script>'
+        result = _extract_embedded_spec_from_html(html)
+        assert result is not None
+        assert "openapi" in result
+
+    def test_inline_spec_in_config(self):
+        from app.tools import _extract_embedded_spec_from_html
+        html = f'SwaggerUIBundle({{ spec: {VALID_SPEC_JSON}, dom_id: "#app" }})'
+        result = _extract_embedded_spec_from_html(html)
+        assert result is not None
+        assert "openapi" in result
+
+    def test_no_embedded_spec(self):
+        from app.tools import _extract_embedded_spec_from_html
+        html = "<html><body>No spec here</body></html>"
+        assert _extract_embedded_spec_from_html(html) is None
+
+
+class TestFetchSwaggerJsonHtmlExtraction:
+    def test_swagger_ui_url_extraction(self):
+        """HTML page with SwaggerUIBundle url -> follows the link to get spec."""
+        swagger_ui_html = '''
+        <html><body>
+        <script>
+        SwaggerUIBundle({ url: "/v1/swagger.json", dom_id: "#swagger-ui" })
+        </script>
+        </body></html>
+        '''
+        html_resp = _html_resp(swagger_ui_html)
+        json_resp = _json_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith("/v1/swagger.json"):
+                return json_resp
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_redoc_spec_url(self):
+        """HTML with <redoc spec-url=...> attribute -> follows the link."""
+        redoc_html = '<html><body><redoc spec-url="/api/openapi.yaml"></redoc></body></html>'
+        html_resp = _html_resp(redoc_html)
+        yaml_resp = _yaml_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith("/api/openapi.yaml"):
+                return yaml_resp
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_rapidoc_spec_url(self):
+        """HTML with <rapi-doc spec-url=...> -> follows the link."""
+        rapidoc_html = '<html><body><rapi-doc spec-url="https://ext.com/openapi.json"></rapi-doc></body></html>'
+        html_resp = _html_resp(rapidoc_html)
+        json_resp = _json_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url == "https://ext.com/openapi.json":
+                return json_resp
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_embedded_json_in_script_tag(self):
+        """Spec embedded in <script type='application/json'> -> extracted directly."""
+        html = f'<html><body><script type="application/json">{VALID_SPEC_JSON}</script></body></html>'
+        html_resp = _html_resp(html)
+
+        with patch("requests.get", return_value=html_resp):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_embedded_spec_in_swagger_config(self):
+        """Spec embedded inline via spec: {...} in JS config -> extracted directly."""
+        html = f'<html><script>SwaggerUIBundle({{ spec: {VALID_SPEC_JSON}, dom_id: "#app" }})</script></html>'
+        html_resp = _html_resp(html)
+
+        with patch("requests.get", return_value=html_resp):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_yaml_direct(self):
+        """URL returns YAML directly -> parsed successfully."""
+        yaml_resp = _yaml_spec_resp()
+
+        with patch("requests.get", return_value=yaml_resp):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com/openapi.yaml")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_yaml_fallback_candidates(self):
+        """JSON candidates fail, YAML candidate succeeds."""
+        yaml_resp = _yaml_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith(".yaml") or url.endswith(".yml"):
+                return yaml_resp
+            return _not_found_resp()
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_no_duplicate_fetches(self):
+        """URLs extracted from HTML that overlap with Phase 1 candidates are not re-fetched."""
+        # The HTML points to the same /swagger.json already tried in Phase 1
+        swagger_ui_html = '''<script>SwaggerUIBundle({ url: "/swagger.json" })</script>'''
+        html_resp = _html_resp(swagger_ui_html)
+
+        call_urls = []
+
+        def side_effect(url, **kwargs):
+            call_urls.append(url)
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        # Should be an error since there's no real spec
+        assert isinstance(result, str)
+        # The URL http://test.com/swagger.json should appear only once (Phase 1),
+        # not again in Phase 2.
+        swagger_json_calls = [u for u in call_urls if u == "http://test.com/swagger.json"]
+        assert len(swagger_json_calls) == 1
+
+    def test_all_fail_still_returns_error(self):
+        """HTML found but no spec extracted -> returns error string."""
+        html = "<html><body>Just a normal page</body></html>"
+        html_resp = _html_resp(html)
+
+        with patch("requests.get", return_value=html_resp):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, str)
+        assert "could not" in result.lower() or "Last error" in result
+
+    def test_link_header_service_desc(self):
+        """HTTP Link header with rel=service-desc -> follows the URL."""
+        # Phase 1 candidates all return 404, but include Link header on first response
+        link_resp = MagicMock()
+        link_resp.status_code = 404
+        link_resp.headers = {
+            "Content-Type": "text/plain",
+            "Link": '</api/v3/openapi.json>; rel="service-desc"',
+        }
+
+        json_resp = _json_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith("/api/v3/openapi.json"):
+                return json_resp
+            return link_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_swagger_resources_spring_boot(self):
+        """Spring Boot /swagger-resources returns JSON array with spec URL."""
+        not_found = _not_found_resp()
+
+        resources_resp = MagicMock()
+        resources_resp.status_code = 200
+        resources_resp.headers = {"Content-Type": "application/json", "Link": ""}
+        resources_resp.json.return_value = [
+            {"url": "/api/internal/v2/api-docs", "swaggerVersion": "2.0", "name": "default"}
+        ]
+        resources_resp.text = json.dumps([{"url": "/api/internal/v2/api-docs"}])
+
+        json_resp = _json_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith("/swagger-resources"):
+                return resources_resp
+            if url.endswith("/api/internal/v2/api-docs"):
+                return json_resp
+            return not_found
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_redoc_init_js_pattern(self):
+        """Redoc.init('url', ...) JavaScript pattern -> follows the link."""
+        redoc_html = """
+        <html><body>
+        <div id="redoc-container"></div>
+        <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+        <script>
+        Redoc.init('/api/openapi.yaml', {
+            expandResponses: "200,400"
+        }, document.getElementById('redoc-container'))
+        </script>
+        </body></html>
+        """
+        html_resp = _html_resp(redoc_html)
+        yaml_resp = _yaml_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if url.endswith("/api/openapi.yaml"):
+                return yaml_resp
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+    def test_swagger_ui_urls_array(self):
+        """SwaggerUIBundle with urls: [{url: ...}] array -> follows the first URL."""
+        html = """
+        <script>
+        const ui = SwaggerUIBundle({
+            urls: [{url: "/api/v1/openapi.json", name: "v1"}, {url: "/api/v2/openapi.json", name: "v2"}],
+            dom_id: '#swagger-ui'
+        })
+        </script>
+        """
+        html_resp = _html_resp(html)
+        json_resp = _json_spec_resp()
+
+        def side_effect(url, **kwargs):
+            if "openapi.json" in url and "/api/" in url:
+                return json_resp
+            return html_resp
+
+        with patch("requests.get", side_effect=side_effect):
+            from app.tools import fetch_swagger_json
+            result = fetch_swagger_json("http://test.com")
+
+        assert isinstance(result, dict)
+        assert "openapi" in result
+
+
+class TestHelperLinkHeader:
+    def test_extracts_service_desc(self):
+        from app.tools import _extract_urls_from_link_header
+        header = '</openapi.json>; rel="service-desc", </docs>; rel="service-doc"'
+        urls = _extract_urls_from_link_header(header, "https://example.com/api")
+        assert "https://example.com/openapi.json" in urls
+        # service-doc should NOT be extracted (only service-desc)
+        assert len(urls) == 1
+
+    def test_empty_header(self):
+        from app.tools import _extract_urls_from_link_header
+        assert _extract_urls_from_link_header("", "https://example.com") == []
+
+    def test_no_service_desc(self):
+        from app.tools import _extract_urls_from_link_header
+        header = '</style.css>; rel="stylesheet"'
+        assert _extract_urls_from_link_header(header, "https://example.com") == []
+
+
+class TestHelperSwaggerResources:
+    def test_extracts_urls_from_array(self):
+        from app.tools import _extract_urls_from_swagger_resources
+        data = [
+            {"url": "/v2/api-docs", "swaggerVersion": "2.0", "name": "default"},
+            {"url": "/v3/api-docs", "swaggerVersion": "3.0", "name": "v3"},
+        ]
+        urls = _extract_urls_from_swagger_resources(data, "https://example.com/swagger-resources")
+        assert len(urls) == 2
+        assert "https://example.com/v2/api-docs" in urls
+        assert "https://example.com/v3/api-docs" in urls
+
+    def test_not_array(self):
+        from app.tools import _extract_urls_from_swagger_resources
+        assert _extract_urls_from_swagger_resources({"url": "/api"}, "https://example.com") == []
+
+    def test_empty_array(self):
+        from app.tools import _extract_urls_from_swagger_resources
+        assert _extract_urls_from_swagger_resources([], "https://example.com") == []
+
+
+class TestHelperExtractSpecUrlsExtra:
+    def test_redoc_init_pattern(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = """Redoc.init('/api/openapi.yaml', {}, document.getElementById('redoc'))"""
+        urls = _extract_spec_urls_from_html(html, "https://example.com/docs")
+        assert "https://example.com/api/openapi.yaml" in urls
+
+    def test_swagger_ui_urls_array(self):
+        from app.tools import _extract_spec_urls_from_html
+        html = """urls: [{url: "/v1/spec.json", name: "v1"}]"""
+        urls = _extract_spec_urls_from_html(html, "https://example.com/")
+        assert "https://example.com/v1/spec.json" in urls
+
+
+# ---------------------------------------------------------------------------
 # TestParseSwaggerDocument
 # ---------------------------------------------------------------------------
 

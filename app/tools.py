@@ -86,59 +86,310 @@ def _resolve_refs(obj, root_doc: dict, max_depth: int = 10, _seen: frozenset | N
     return obj
 
 
+def _is_swagger_dict(data) -> bool:
+    """Return True if *data* looks like an OpenAPI/Swagger document."""
+    return isinstance(data, dict) and bool(
+        "swagger" in data or "openapi" in data or "paths" in data
+    )
+
+
+def _try_parse_yaml(text: str) -> dict | None:
+    """Try to parse *text* as YAML and return it if it looks like an OpenAPI spec."""
+    try:
+        import yaml  # deferred so PyYAML is only required when YAML is encountered
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(text)
+        if _is_swagger_dict(data):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+# Regex patterns for extracting spec URLs from HTML documentation pages.
+_SPEC_URL_PATTERNS: list[re.Pattern[str]] = [
+    # SwaggerUIBundle({ url: "..." })
+    re.compile(
+        r"""SwaggerUIBundle\s*\(\s*\{[^}]*?url\s*:\s*["']([^"']+)["']""",
+        re.DOTALL,
+    ),
+    # SwaggerUIBundle urls array: urls: [{url: "..."}]
+    re.compile(
+        r"""urls\s*:\s*\[\s*\{[^}]*?url\s*:\s*["']([^"']+)["']""",
+        re.DOTALL,
+    ),
+    # Redoc.init('url', ...) or Redoc.init("url", ...)
+    re.compile(
+        r"""Redoc\.init\s*\(\s*["']([^"']+)["']""",
+    ),
+    # Generic url: or url= pointing to swagger/openapi/api-docs paths
+    re.compile(
+        r"""url\s*[:=]\s*["']((?:https?://|/)[^"'\s]*(?:swagger|openapi|api-docs)[^"'\s]*)["']""",
+        re.IGNORECASE,
+    ),
+    # Redoc / RapiDoc spec-url attribute
+    re.compile(r"""spec-url\s*=\s*["']([^"']+)["']""", re.IGNORECASE),
+    # Swagger UI v4 configUrl
+    re.compile(r"""configUrl\s*[:=]\s*["']([^"']+)["']""", re.IGNORECASE),
+    # Any href/src to .json/.yaml/.yml files (absolute or relative)
+    re.compile(r"""["']((?:https?://|/|\.{0,2}/)[^"'\s]+\.(?:json|yaml|yml))["']"""),
+]
+
+_MAX_HTML_SIZE = 512_000  # 500 KB cap for stored HTML responses
+
+
+def _extract_spec_urls_from_html(html: str, page_url: str) -> list[str]:
+    """Extract candidate spec URLs from an HTML page using regex patterns.
+
+    Returns a deduplicated list of absolute URLs ordered by pattern confidence.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    for pattern in _SPEC_URL_PATTERNS:
+        for match in pattern.finditer(html):
+            raw = match.group(1).strip()
+            absolute = urljoin(page_url, raw)
+            if absolute not in seen:
+                seen.add(absolute)
+                urls.append(absolute)
+    return urls
+
+
+def _extract_urls_from_link_header(link_header: str, base_url: str) -> list[str]:
+    """Extract spec URLs from an HTTP ``Link`` header (RFC 8631).
+
+    Looks for links with ``rel="service-desc"`` or ``rel="service-doc"`` which
+    indicate machine-readable and human-readable API descriptions respectively.
+    """
+    urls: list[str] = []
+    # Link headers: <url>; rel="service-desc", <url2>; rel="..."
+    for part in link_header.split(","):
+        part = part.strip()
+        url_match = re.match(r"<([^>]+)>", part)
+        if not url_match:
+            continue
+        if re.search(r'rel\s*=\s*"service-desc"', part):
+            urls.append(urljoin(base_url, url_match.group(1)))
+    return urls
+
+
+def _extract_urls_from_swagger_resources(data, base_url: str) -> list[str]:
+    """Extract spec URLs from a Spring Boot ``/swagger-resources`` response.
+
+    The endpoint returns a JSON array like ``[{"url": "/v2/api-docs", "name": "default"}]``.
+    """
+    urls: list[str] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and "url" in item:
+                urls.append(urljoin(base_url, item["url"]))
+    return urls
+
+
+def _extract_embedded_spec_from_html(html: str) -> dict | None:
+    """Try to extract an OpenAPI spec embedded directly in HTML.
+
+    Checks ``<script type="application/json">`` blocks and inline ``spec: {...}``
+    objects in SwaggerUI configuration.
+    """
+    # 1. <script type="application/json"> blocks
+    for match in re.finditer(
+        r'<script[^>]*type\s*=\s*["\']application/json["\'][^>]*>([\s\S]*?)</script>',
+        html,
+        re.IGNORECASE,
+    ):
+        try:
+            data = json.loads(match.group(1))
+            if _is_swagger_dict(data):
+                return data
+        except Exception:
+            continue
+
+    # 2. spec: {...} in JS config (e.g. SwaggerUIBundle({ spec: {...} }))
+    for match in re.finditer(r"\bspec\s*:\s*", html):
+        pos = match.end()
+        try:
+            decoder = json.JSONDecoder()
+            data, _ = decoder.raw_decode(html, pos)
+            if _is_swagger_dict(data):
+                return data
+        except Exception:
+            continue
+
+    return None
+
+
 def fetch_swagger_json(url: str) -> dict | str:
     """Fetches a Swagger/OpenAPI document from the given URL.
 
-    Tries the URL and several common variants:
-    - url as-is
-    - url + "/swagger.json"
-    - url + "/v1/swagger.json"
-    - url + "/openapi.json"
-    - url + "/api-docs"
-    - url + "/docs"
+    **Phase 1** — tries the URL and several common JSON/YAML variants directly.
+    **Phase 2** — if Phase 1 got only HTML responses, extracts spec URLs or
+    embedded specs from the HTML (supports Swagger UI, Redoc, RapiDoc pages).
 
     Returns:
         The parsed swagger dict on success, or an error description string.
     """
     base = url.rstrip("/")
     candidates = [
+        # Direct spec URLs (JSON)
         base,
         base + "/swagger.json",
         base + "/v1/swagger.json",
         base + "/openapi.json",
         base + "/api-docs",
+        base + "/v2/api-docs",             # Spring Boot Swagger 2
+        base + "/v3/api-docs",             # Spring Boot OpenAPI 3
+        base + "/swagger/v1/swagger.json", # ASP.NET Core default
+        base + "/api/swagger.json",
+        base + "/api/openapi.json",
+        base + "/q/openapi",               # Quarkus
+        # HTML documentation pages (handled by Phase 2)
         base + "/docs",
+        base + "/swagger-ui.html",         # Classic Swagger UI
+        base + "/swagger-ui/",             # Modern Swagger UI
+        # YAML variants
+        base + "/swagger.yaml",
+        base + "/openapi.yaml",
+        base + "/v1/swagger.yaml",
+        base + "/openapi.yml",
+        base + "/swagger.yml",
+        # Spring Boot swagger-resources (returns JSON array with spec URLs)
+        base + "/swagger-resources",
     ]
+    seen_urls: set[str] = set(candidates)
+    html_responses: list[tuple[str, str]] = []
+    link_header_urls: list[str] = []
+    swagger_resources_urls: list[str] = []
     last_error: str = ""
+
+    # ------------------------------------------------------------------
+    # Phase 1: try all candidates, looking for JSON or YAML specs
+    # ------------------------------------------------------------------
     for candidate_url in candidates:
         try:
             resp = requests.get(candidate_url, timeout=30)
+
+            # Check for Link header with rel="service-desc" (RFC 8631)
+            # — collect even from non-200 responses
+            link_header = resp.headers.get("Link")
+            if link_header:
+                link_header_urls.extend(
+                    _extract_urls_from_link_header(link_header, candidate_url)
+                )
+
             if resp.status_code != 200:
                 last_error = f"HTTP {resp.status_code} from {candidate_url}"
                 continue
+
             content_type = resp.headers.get("Content-Type", "")
-            is_json_content = "json" in content_type
+
+            # Collect HTML responses for Phase 2
+            if "html" in content_type.lower():
+                text = resp.text[:_MAX_HTML_SIZE]
+                html_responses.append((candidate_url, text))
+                last_error = f"HTML response from {candidate_url}"
+                continue
+
+            # Try JSON first
             try:
                 data = resp.json()
-            except Exception:
-                if not is_json_content:
-                    last_error = f"Non-JSON response from {candidate_url}"
+                if _is_swagger_dict(data):
+                    logger.info("fetch_swagger_json: fetched from %s", candidate_url)
+                    return data
+                # Check for Spring Boot /swagger-resources response (JSON array)
+                if isinstance(data, list) and candidate_url.endswith("/swagger-resources"):
+                    swagger_resources_urls.extend(
+                        _extract_urls_from_swagger_resources(data, candidate_url)
+                    )
+                    last_error = f"swagger-resources array from {candidate_url}"
                     continue
-                last_error = f"Invalid JSON from {candidate_url}"
-                continue
-            if not isinstance(data, dict):
-                last_error = f"Response is not a JSON object from {candidate_url}"
-                continue
-            if "swagger" in data or "openapi" in data or "paths" in data:
-                logger.info("fetch_swagger_json: fetched from %s", candidate_url)
-                return data
-            last_error = f"JSON from {candidate_url} does not look like OpenAPI (missing swagger/openapi/paths keys)"
+                last_error = f"JSON from {candidate_url} does not look like OpenAPI (missing swagger/openapi/paths keys)"
+            except Exception:
+                # Try YAML when JSON parsing fails
+                yaml_result = _try_parse_yaml(resp.text)
+                if yaml_result is not None:
+                    logger.info("fetch_swagger_json: fetched YAML from %s", candidate_url)
+                    return yaml_result
+                last_error = f"Non-JSON/YAML response from {candidate_url}"
         except requests.Timeout:
             last_error = f"Timeout connecting to {candidate_url}"
         except requests.ConnectionError as e:
             last_error = f"Connection error for {candidate_url}: {e}"
         except Exception as e:
             last_error = f"Unexpected error for {candidate_url}: {e}"
+
+    # ------------------------------------------------------------------
+    # Phase 1b: try URLs discovered via Link headers & swagger-resources
+    # ------------------------------------------------------------------
+    for discovered_url in link_header_urls + swagger_resources_urls:
+        if discovered_url in seen_urls:
+            continue
+        seen_urls.add(discovered_url)
+        try:
+            resp = requests.get(discovered_url, timeout=30)
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code} from {discovered_url}"
+                continue
+            try:
+                data = resp.json()
+                if _is_swagger_dict(data):
+                    logger.info("fetch_swagger_json: fetched from discovered URL %s", discovered_url)
+                    return data
+            except Exception:
+                pass
+            yaml_result = _try_parse_yaml(resp.text)
+            if yaml_result is not None:
+                logger.info("fetch_swagger_json: fetched YAML from discovered URL %s", discovered_url)
+                return yaml_result
+            last_error = f"No valid spec from discovered URL {discovered_url}"
+        except Exception as e:
+            last_error = f"Error fetching discovered URL {discovered_url}: {e}"
+
+    # ------------------------------------------------------------------
+    # Phase 2: extract spec from collected HTML responses
+    # ------------------------------------------------------------------
+    for html_url, html_text in html_responses:
+        # 2a: look for an embedded spec in the HTML itself
+        embedded = _extract_embedded_spec_from_html(html_text)
+        if embedded is not None:
+            logger.info("fetch_swagger_json: extracted embedded spec from %s", html_url)
+            return embedded
+
+        # 2b: extract spec URLs and try fetching them
+        spec_urls = _extract_spec_urls_from_html(html_text, html_url)
+        for spec_url in spec_urls:
+            if spec_url in seen_urls:
+                continue
+            seen_urls.add(spec_url)
+            try:
+                resp = requests.get(spec_url, timeout=30)
+                if resp.status_code != 200:
+                    last_error = f"HTTP {resp.status_code} from {spec_url}"
+                    continue
+                # Try JSON
+                try:
+                    data = resp.json()
+                    if _is_swagger_dict(data):
+                        logger.info(
+                            "fetch_swagger_json: fetched from HTML-extracted URL %s",
+                            spec_url,
+                        )
+                        return data
+                except Exception:
+                    pass
+                # Try YAML
+                yaml_result = _try_parse_yaml(resp.text)
+                if yaml_result is not None:
+                    logger.info(
+                        "fetch_swagger_json: fetched YAML from HTML-extracted URL %s",
+                        spec_url,
+                    )
+                    return yaml_result
+                last_error = f"No valid spec from HTML-extracted URL {spec_url}"
+            except Exception as e:
+                last_error = f"Error fetching HTML-extracted URL {spec_url}: {e}"
 
     error_msg = f"Could not fetch Swagger document from any URL variant. Last error: {last_error}"
     logger.error("fetch_swagger_json failed: %s", error_msg)
