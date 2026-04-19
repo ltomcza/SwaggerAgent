@@ -4,6 +4,8 @@ An AI-powered FastAPI service that fetches, parses, and stores OpenAPI/Swagger d
 
 ## Features
 
+For the full architecture reference, see [Project_Architecture_Blueprint.md](Project_Architecture_Blueprint.md).
+
 - **Automatic OpenAPI Discovery** — tries multiple URL variants (`/swagger.json`, `/openapi.json`, `/api-docs`, etc.) to locate the spec
 - **OpenAPI 3.x & Swagger 2.0** — normalizes both formats into a unified structure with recursive `$ref` resolution
 - **Change Detection** — compares parsed endpoints against the database; skips processing when nothing changed
@@ -19,6 +21,7 @@ An AI-powered FastAPI service that fetches, parses, and stores OpenAPI/Swagger d
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Full Architecture Blueprint](Project_Architecture_Blueprint.md)
 - [High-Level Architecture Diagram](#high-level-architecture-diagram)
 - [7-Step Pipeline](#7-step-pipeline)
 - [Database Schema](#database-schema)

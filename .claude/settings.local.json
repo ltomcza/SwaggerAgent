@@ -41,7 +41,8 @@
       "Bash(dir D:\\\\AI\\\\SwaggerAgent\\\\examples:*)",
       "Bash(reg query:*)",
       "Bash(choco install:*)",
-      "Bash(pytest:*)"
+      "Bash(pytest:*)",
+      "Bash(xargs cat *)"
     ]
   }
 }
